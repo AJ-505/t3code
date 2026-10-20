@@ -154,6 +154,7 @@ jobs:
           set +e
           CMD=$(printf '%s' "$CMD_B64" | base64 -d)
           LIMIT="${CMD_TIMEOUT:-30}"
+          LIMIT_SECONDS=$((LIMIT * 60))
           START="<<<CI_OUTPUT_"
           START="${START}START>>>"
           END="<<<CI_OUTPUT_"
@@ -162,7 +163,7 @@ jobs:
           echo "node: $(node --version 2>/dev/null || echo missing)"
           echo "command: $CMD"
           echo "$START"
-          timeout --signal=TERM --kill-after=30 "$LIMIT" bash -c "$CMD" 2>&1
+          timeout --signal=TERM --kill-after=30 "$LIMIT_SECONDS" bash -c "$CMD" 2>&1
           CODE=$?
           echo "$END"
           {

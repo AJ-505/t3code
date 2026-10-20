@@ -51,3 +51,11 @@ it.effect("drops planner statistics a database already has", () => {
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });
+
+it.effect("applies synchronous=NORMAL in the shared persistence setup", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ readonly synchronous: number }>`PRAGMA synchronous`;
+    assert.equal(rows[0]?.synchronous, 1);
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);

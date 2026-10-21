@@ -114,6 +114,15 @@ const launchCodex = (scope: Effect.Success<typeof make>, threadId: string) =>
   );
 
 describe("AgentScope service", () => {
+  it.effect("keeps systemd-oomd from picking the agent scope first", () =>
+    withFakeSystemd(({ scope }) =>
+      Effect.gen(function* () {
+        const agent = yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        expect(agent.args).toContain("--property=ManagedOOMPreference=avoid");
+      }),
+    ),
+  );
+
   it.effect("labels a thread from its newest scope until its next session clears it", () =>
     withFakeSystemd(({ scope, units }) =>
       Effect.gen(function* () {

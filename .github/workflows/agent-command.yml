@@ -1,0 +1,185 @@
+name: agent-command
+run-name: "ci: ${{ inputs.label }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      cmd_b64:
+        description: "Base64 encoded command"
+        required: true
+        type: string
+      label:
+        description: "Short label used to find the run"
+        required: false
+        default: adhoc
+        type: string
+      deps:
+        description: "Dependency install mode: auto, install, none"
+        required: false
+        default: auto
+        type: string
+      timeout:
+        description: "Job timeout in minutes"
+        required: false
+        default: 30
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-command-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect package manager
+        id: pm
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ -f pnpm-lock.yaml ]; then
+            echo "name=pnpm" >> "$GITHUB_OUTPUT"
+            echo "lock=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+          elif [ -f bun.lock ] || [ -f bun.lockb ]; then
+            echo "name=bun" >> "$GITHUB_OUTPUT"
+            if [ -f bun.lock ]; then echo "lock=bun.lock" >> "$GITHUB_OUTPUT"; else echo "lock=bun.lockb" >> "$GITHUB_OUTPUT"; fi
+          elif [ -f yarn.lock ]; then
+            echo "name=yarn" >> "$GITHUB_OUTPUT"
+            echo "lock=yarn.lock" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then
+            echo "name=npm" >> "$GITHUB_OUTPUT"
+            echo "lock=package-lock.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=none" >> "$GITHUB_OUTPUT"
+            echo "lock=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pin node version
+        id: node
+        shell: bash
+        run: |
+          set -uo pipefail
+          version=""
+          if [ -f .nvmrc ]; then version=$(tr -d ' \t\n\r' < .nvmrc); fi
+          if [ -z "$version" ] && [ -f package.json ]; then
+            version=$(node -e "const p=require('./package.json');process.stdout.write(p.engines&&p.engines.node||'')" 2>/dev/null || true)
+            version=$(printf '%s' "$version" | sed 's/[^0-9.]//g')
+          fi
+          if [ -z "$version" ]; then version="22"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Enable package manager
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          name="${{ steps.pm.outputs.name }}"
+          if [ "$name" = "pnpm" ]; then
+            corepack enable
+            if [ -f package.json ]; then
+              pmver=$(node -e "const p=require('./package.json');process.stdout.write(p.packageManager||'')" 2>/dev/null || true)
+              case "$pmver" in
+                pnpm@*) corepack prepare "$pmver" --activate || true ;;
+              esac
+            fi
+            echo "pnpm: $(pnpm --version 2>/dev/null || echo unavailable)"
+          fi
+
+      - name: Set up node with pnpm cache
+        if: steps.pm.outputs.name == 'pnpm'
+        continue-on-error: true
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: pnpm
+
+      - name: Set up node with npm cache
+        if: steps.pm.outputs.name == 'npm'
+        continue-on-error: true
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: npm
+
+      - name: Set up node
+        if: steps.pm.outputs.name != 'pnpm' && steps.pm.outputs.name != 'npm'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Set up bun
+        if: steps.pm.outputs.name == 'bun'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache bun packages
+        if: steps.pm.outputs.name == 'bun'
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles(steps.pm.outputs.lock) }}
+          restore-keys: ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        if: inputs.deps != 'none'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          name="${{ steps.pm.outputs.name }}"
+          case "$name" in
+            pnpm) pnpm install --frozen-lockfile ;;
+            bun) bun install --frozen-lockfile ;;
+            yarn) yarn install --frozen-lockfile ;;
+            npm) npm ci || npm install ;;
+            none) echo "no package manager detected" ;;
+          esac
+
+      - name: Run agent command
+        shell: bash
+        env:
+          CMD_B64: ${{ inputs.cmd_b64 }}
+          CMD_TIMEOUT: ${{ inputs.timeout }}
+        run: |
+          set +e
+          CMD=$(printf '%s' "$CMD_B64" | base64 -d)
+          LIMIT="${CMD_TIMEOUT:-30}"
+          LIMIT_SECONDS=$((LIMIT * 60))
+          START="<<<CI_OUTPUT_"
+          START="${START}START>>>"
+          END="<<<CI_OUTPUT_"
+          END="${END}END>>>"
+          echo "cwd: $PWD"
+          echo "node: $(node --version 2>/dev/null || echo missing)"
+          echo "command: $CMD"
+          echo "$START"
+          timeout --signal=TERM --kill-after=30 "$LIMIT_SECONDS" bash -c "$CMD" 2>&1
+          CODE=$?
+          echo "$END"
+          {
+            echo "### Agent command"
+            echo
+            echo '```'
+            printf '%s\n' "$CMD"
+            echo '```'
+            echo
+            echo "Exit code: $CODE"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CODE" -eq 124 ]; then
+            echo "command timed out after ${LIMIT} minutes"
+            exit 124
+          fi
+          if [ "$CODE" -ne 0 ]; then
+            echo "command failed with exit code $CODE"
+            exit "$CODE"
+          fi

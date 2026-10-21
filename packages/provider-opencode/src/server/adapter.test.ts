@@ -1765,6 +1765,7 @@ describe("OpenCodeAdapterV2", () => {
       );
       yield* harness.startTurn();
       const terminalEvents = yield* harness.runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
         Stream.runCollect,
         Effect.forkScoped,
       );

@@ -66,6 +66,7 @@ import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/
 import { t3OrchestrationSystemPrompt } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
+import { classifyOpenCodeProviderFault } from "./failure.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
@@ -2647,6 +2648,12 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                       (state): state is OpenCodeThreadState => state !== undefined,
                     );
               const message = openCodeErrorMessage(event);
+              const nowEpochMillis = DateTime.toEpochMillis(yield* DateTime.now);
+              const fault = classifyOpenCodeProviderFault({
+                error: event.properties.error,
+                message,
+                nowEpochMillis,
+              });
               if (
                 !isMessageAbortedError(event) &&
                 (event.properties.sessionID === undefined ||
@@ -2664,10 +2671,21 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                       failure: makeProviderFailure({
                         message,
                         code: event.properties.error?.name ?? null,
-                        class: "provider_error",
+                        class: fault.class,
+                        retryable: fault.retryable,
+                        resetAt: fault.resetAt,
                       }),
+                      // A spent quota leaves the session healthy, so the thread
+                      // stays reusable and the recovery worker resumes it once
+                      // the window resets. Every other fault follows the
+                      // session ID: an error without one has no session to
+                      // reuse.
                       threadDisposition:
-                        event.properties.sessionID === undefined ? "broken" : "reusable",
+                        fault.class === "usage_limit"
+                          ? "reusable"
+                          : event.properties.sessionID === undefined
+                            ? "broken"
+                            : "reusable",
                     },
                   );
                 }

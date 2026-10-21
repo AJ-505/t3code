@@ -1742,6 +1742,64 @@ describe("OpenCodeAdapterV2", () => {
     ),
   );
 
+  it.effect("reports a rate limited turn as a usage limit and keeps the thread reusable", () =>
+    Effect.gen(function* () {
+      const nativeEvents = asyncEventStream();
+      const harness = yield* makeOpenCodeRuntimeHarness(
+        "rate-limited",
+        "native-opencode-rate-limited",
+        {
+          event: {
+            subscribe: async (_input: unknown, options: { signal?: AbortSignal }) => {
+              options.signal?.addEventListener("abort", () => nativeEvents.close(), { once: true });
+              return { stream: nativeEvents.stream };
+            },
+          },
+          session: {
+            create: async () => ({
+              data: { id: "native-opencode-rate-limited", time: { created: 1, updated: 1 } },
+            }),
+            promptAsync: async () => ({ data: true }),
+          },
+        },
+      );
+      yield* harness.startTurn();
+      const terminalEvents = yield* harness.runtime.events.pipe(
+        Stream.takeUntil((event) => event.type === "turn.terminal"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* Effect.promise(() =>
+        nativeEvents.push({
+          type: "session.error",
+          properties: {
+            sessionID: "native-opencode-rate-limited",
+            error: {
+              name: "APIError",
+              data: {
+                message: "Rate limit exceeded.",
+                statusCode: 429,
+                responseHeaders: { "retry-after": "120" },
+              },
+            },
+          },
+        }),
+      );
+
+      const received = Array.from(yield* Fiber.join(terminalEvents));
+      const terminals = received.filter((event) => event.type === "turn.terminal");
+      assert.lengthOf(terminals, 1);
+      assert.equal(terminals[0]?.status, "failed");
+      assert.equal(terminals[0]?.failure?.class, "usage_limit");
+      assert.isNotNull(terminals[0]?.failure?.resetAt ?? null);
+      assert.equal(terminals[0]?.threadDisposition, "reusable");
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
   it.effect("fails an active turn when the OpenCode event stream ends cleanly", () =>
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();

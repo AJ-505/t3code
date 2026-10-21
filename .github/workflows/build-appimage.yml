@@ -1,0 +1,101 @@
+name: Build desktop AppImage
+
+# Builds the Linux AppImage from source with the fixes in this fork and
+# uploads it as a workflow artifact. The upstream release workflow needs
+# release secrets, a tag, and a signed build, none of which apply to a local
+# test build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build"
+        required: true
+        default: main
+        type: string
+      version:
+        description: "Version string for the app"
+        required: true
+        default: "0.1.1-local.1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-appimage-${{ inputs.branch }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build AppImage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libsecret-1-dev \
+            pkg-config \
+            imagemagick \
+            file \
+            libfuse2 \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libgtk-3-0 \
+            libgbm1 \
+            libasound2t64
+
+      - name: Ensure Electron runtime
+        run: pnpm run --filter @t3tools/desktop ensure:electron
+
+      - name: Build the JS bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: pnpm run build:desktop
+
+      - name: Build the resource monitor
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml
+
+      - name: Build the AppImage
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: "true"
+        run: |
+          node scripts/build-desktop-artifact.ts \
+            --platform linux \
+            --target AppImage \
+            --arch x64 \
+            --build-version "${{ inputs.version }}" \
+            --skip-build \
+            --verbose
+
+      - name: List the build output
+        run: ls -la release/ || true
+
+      - name: Upload the AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: t3code-appimage
+          path: release/*.AppImage
+          if-no-files-found: error
+          retention-days: 14

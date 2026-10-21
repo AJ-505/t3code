@@ -37,18 +37,13 @@ jobs:
         with:
           ref: ${{ inputs.branch }}
           fetch-depth: 1
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: package.json
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
 
       - name: Install build libraries
         run: |
@@ -67,12 +62,12 @@ jobs:
             libasound2t64
 
       - name: Ensure Electron runtime
-        run: pnpm run --filter @t3tools/desktop ensure:electron
+        run: vp run --filter @t3tools/desktop ensure:electron
 
       - name: Build the JS bundle
         env:
           T3CODE_TELEMETRY_CHANNEL: dev
-        run: pnpm run build:desktop
+        run: vp run build:desktop
 
       - name: Build the resource monitor
         run: |

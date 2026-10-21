@@ -66,6 +66,7 @@ import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/
 import { t3OrchestrationSystemPrompt } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
+import { classifyOpenCodeProviderFault } from "./failure.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
@@ -81,6 +82,8 @@ import {
   subagentThreadTitle,
 } from "@t3tools/provider-core/server/subagentProjection";
 import { openCodeToolTurnItem } from "./toolItems.ts";
+
+export { openCodeToolProjectionKind } from "./toolItems.ts";
 
 export const OPENCODE_PROVIDER = ProviderDriverKind.make("opencode");
 export const OPENCODE_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(OPENCODE_PROVIDER);
@@ -2647,6 +2650,12 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                       (state): state is OpenCodeThreadState => state !== undefined,
                     );
               const message = openCodeErrorMessage(event);
+              const nowEpochMillis = DateTime.toEpochMillis(yield* DateTime.now);
+              const fault = classifyOpenCodeProviderFault({
+                error: event.properties.error,
+                message,
+                nowEpochMillis,
+              });
               if (
                 !isMessageAbortedError(event) &&
                 (event.properties.sessionID === undefined ||
@@ -2664,10 +2673,16 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                       failure: makeProviderFailure({
                         message,
                         code: event.properties.error?.name ?? null,
-                        class: "provider_error",
+                        class: fault.class,
+                        retryable: fault.retryable,
+                        resetAt: fault.resetAt,
                       }),
                       threadDisposition:
-                        event.properties.sessionID === undefined ? "broken" : "reusable",
+                        fault.retryable === true
+                          ? "reusable"
+                          : event.properties.sessionID === undefined
+                            ? "broken"
+                            : "reusable",
                     },
                   );
                 }

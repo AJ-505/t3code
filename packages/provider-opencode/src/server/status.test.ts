@@ -9,9 +9,10 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
-import { beforeEach } from "vite-plus/test";
+import { beforeEach, describe } from "vite-plus/test";
 
 import { OpenCodeSettings } from "../settings.ts";
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
@@ -19,6 +20,7 @@ import * as OpenCodeServerOwner from "./OpenCodeServerOwner.ts";
 import {
   checkOpenCodeProviderStatus,
   loadOpenCode2Workspace,
+  makeOpenCode2ModelLoader,
   type OpenCode2Model,
   type OpenCode2Workspace,
 } from "./status.ts";
@@ -871,3 +873,82 @@ it.effect("reads a fresh OpenCode 2 directory again once its scan has ended", ()
     NodeAssert.deepEqual(yield* Fiber.join(load), scanned);
   }),
 );
+
+describe("makeOpenCode2ModelLoader", () => {
+  const bigPickle: OpenCode2Model = {
+    providerID: "opencode",
+    id: "big-pickle",
+    name: "Big Pickle",
+    variants: [],
+  };
+  const stepFive: OpenCode2Model = {
+    providerID: "opencode",
+    id: "step-5",
+    name: "Step 5",
+    variants: [],
+  };
+
+  it.effect("waits past a slow server start before it bounds catalog re-reads", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const load = yield* makeOpenCode2ModelLoader(
+        Effect.suspend(() =>
+          calls++ === 0
+            ? Effect.sleep("20 seconds").pipe(Effect.as([bigPickle]))
+            : Effect.succeed([bigPickle]),
+        ),
+      );
+      const fiber = yield* load.pipe(Effect.forkChild);
+      yield* TestClock.adjust("21 seconds");
+      NodeAssert.deepEqual(yield* Fiber.join(fiber), [bigPickle]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("settles on two agreeing reads of a catalog that is still loading", () =>
+    Effect.gen(function* () {
+      const replies: Array<ReadonlyArray<OpenCode2Model>> = [
+        [],
+        [bigPickle],
+        [bigPickle, stepFive],
+      ];
+      const load = yield* makeOpenCode2ModelLoader(
+        Effect.sync(() => replies.shift() ?? [bigPickle, stepFive]),
+      );
+      const fiber = yield* load.pipe(Effect.forkChild);
+      yield* TestClock.adjust("2 seconds");
+      NodeAssert.deepEqual(yield* Fiber.join(fiber), [bigPickle, stepFive]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("reports no models when a running server's catalog stays empty", () =>
+    Effect.gen(function* () {
+      const load = yield* makeOpenCode2ModelLoader(Effect.succeed([]));
+      const fiber = yield* load.pipe(Effect.forkChild);
+      yield* TestClock.adjust("11 seconds");
+      NodeAssert.deepEqual(yield* Fiber.join(fiber), []);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("keeps the last catalog when a later server never answers", () =>
+    Effect.gen(function* () {
+      let answers = true;
+      const load = yield* makeOpenCode2ModelLoader(
+        Effect.suspend(() => (answers ? Effect.succeed([bigPickle]) : Effect.never)),
+      );
+      const warm = yield* load.pipe(Effect.forkChild);
+      yield* TestClock.adjust("1 second");
+      NodeAssert.deepEqual(yield* Fiber.join(warm), [bigPickle]);
+      answers = false;
+      const cold = yield* load.pipe(Effect.forkChild);
+      yield* TestClock.adjust("61 seconds");
+      NodeAssert.deepEqual(yield* Fiber.join(cold), [bigPickle]);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect("fails when the first server start fails and no catalog was loaded", () =>
+    Effect.gen(function* () {
+      const load = yield* makeOpenCode2ModelLoader(Effect.fail("server did not start"));
+      NodeAssert.deepEqual(yield* Effect.flip(load), "server did not start");
+    }),
+  );
+});

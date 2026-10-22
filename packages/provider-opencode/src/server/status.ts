@@ -9,6 +9,7 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
@@ -452,7 +453,11 @@ const catalogFingerprint = (models: ReadonlyArray<OpenCode2Model>) =>
     .toSorted()
     .join("\n");
 
-/** A cold server can list a partial catalog; two agreeing reads reduce that startup race. */
+/**
+ * A cold server can list a partial catalog; two agreeing reads reduce that startup race.
+ * The first read includes the server start, which can take many seconds on a busy machine,
+ * so only the re-reads after it count against the settle budget.
+ */
 export const makeOpenCode2ModelLoader = <E>(
   list: Effect.Effect<ReadonlyArray<OpenCode2Model>, E>,
 ) =>
@@ -461,19 +466,26 @@ export const makeOpenCode2ModelLoader = <E>(
     return Effect.suspend(() => {
       let previous: string | undefined;
       let latest: ReadonlyArray<OpenCode2Model> = [];
+      const settles = (models: ReadonlyArray<OpenCode2Model>) => {
+        if (models.length > 0) latest = models;
+        const fingerprint = models.length > 0 ? catalogFingerprint(models) : undefined;
+        const settled = fingerprint !== undefined && fingerprint === previous;
+        previous = fingerprint;
+        return settled;
+      };
+      const reread = list.pipe(
+        Effect.delay("250 millis"),
+        Effect.repeat({ until: settles, schedule: Schedule.spaced("250 millis") }),
+        Effect.timeoutOption("10 seconds"),
+      );
       return list.pipe(
-        Effect.repeat({
-          until: (models) => {
-            if (models.length > 0) latest = models;
-            const fingerprint = models.length > 0 ? catalogFingerprint(models) : undefined;
-            const settled = fingerprint !== undefined && fingerprint === previous;
-            previous = fingerprint;
-            return settled;
-          },
-          schedule: Schedule.spaced("250 millis"),
-        }),
-        Effect.catch((error) => (latest.length > 0 ? Effect.succeed(latest) : Effect.fail(error))),
-        Effect.timeoutOption("5 seconds"),
+        Effect.tap((first) => Effect.sync(() => settles(first))),
+        Effect.andThen(reread),
+        Effect.timeoutOption("1 minute"),
+        Effect.map(Option.flatten),
+        Effect.catch((error) =>
+          latest.length > 0 ? Effect.succeedSome(latest) : Effect.fail(error),
+        ),
         Effect.map((loaded) => {
           // Fresh progress may still be partial, but a warm cache must not freeze slow catalogs.
           if (loaded._tag === "Some") lastLoaded = loaded.value;

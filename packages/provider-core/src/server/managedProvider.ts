@@ -11,6 +11,7 @@ import * as Fiber from "effect/Fiber";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
@@ -34,6 +35,9 @@ function withUsageLimits(
   const { usageLimits: _previous, ...rest } = snapshot;
   return usageLimits ? { ...rest, usageLimits } : rest;
 }
+
+const isSettledAfterStartup = (snapshot: ServerProvider) =>
+  !snapshot.enabled || !snapshot.installed || snapshot.status === "ready";
 
 export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(function* <
   Settings,
@@ -292,7 +296,23 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
     ),
   ).pipe(Effect.forkScoped);
 
+  const recheckUnlessSettled = Ref.get(snapshotStateRef).pipe(
+    Effect.flatMap(({ snapshot }) =>
+      isSettledAfterStartup(snapshot) ? Effect.succeed(snapshot) : refreshSnapshot(),
+    ),
+  );
+  const recheckAfterStartupLoad = recheckUnlessSettled.pipe(
+    Effect.delay("15 seconds"),
+    Effect.repeat({
+      until: isSettledAfterStartup,
+      times: 2,
+      schedule: Schedule.exponential("30 seconds"),
+    }),
+  );
   yield* applySnapshot(initialSettings, { forceRefresh: true }).pipe(
+    Effect.flatMap((snapshot) =>
+      isSettledAfterStartup(snapshot) ? Effect.void : Effect.asVoid(recheckAfterStartupLoad),
+    ),
     Effect.ignoreCause({ log: true }),
     Effect.forkScoped,
   );

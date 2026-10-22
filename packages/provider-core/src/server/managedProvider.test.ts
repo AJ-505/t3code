@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ProviderHost from "./ProviderHost.ts";
 import { makeManagedServerProvider } from "./managedProvider.ts";
@@ -521,5 +522,86 @@ describe("makeManagedServerProvider", () => {
         assert.deepStrictEqual((yield* provider.refresh).usageLimits, completeLimits);
       }),
     ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+});
+
+describe("makeManagedServerProvider startup rechecks", () => {
+  const busySnapshot: ServerProvider = {
+    ...refreshedSnapshot,
+    status: "error",
+    message: "OpenCode CLI version probe timed out after 10 seconds.",
+  };
+  const startupProvider = (checks: ReadonlyArray<ServerProvider>) =>
+    Effect.gen(function* () {
+      const checkCalls = yield* Ref.make(0);
+      const provider = yield* makeManagedServerProvider<TestSettings>({
+        resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+        getSettings: Effect.succeed({ enabled: true }),
+        streamSettings: Stream.empty,
+        haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+        initialSnapshot: () => Effect.succeed(initialSnapshot),
+        checkProvider: Ref.getAndUpdate(checkCalls, (count) => count + 1).pipe(
+          Effect.map((count) => checks[Math.min(count, checks.length - 1)]!),
+        ),
+        refreshInterval: "1 hour",
+      });
+      yield* Effect.yieldNow;
+      return { provider, checkCalls: Ref.get(checkCalls) };
+    });
+
+  it.effect("checks again after the startup load until the provider is ready", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { provider, checkCalls } = yield* startupProvider([
+          busySnapshot,
+          busySnapshot,
+          refreshedSnapshot,
+        ]);
+        assert.strictEqual(yield* checkCalls, 1);
+        yield* TestClock.adjust("15 seconds");
+        assert.strictEqual(yield* checkCalls, 2);
+        yield* TestClock.adjust("10 minutes");
+        assert.strictEqual(yield* checkCalls, 3);
+        assert.deepStrictEqual(yield* provider.getSnapshot, refreshedSnapshot);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(layerAlwaysRunTest, TestClock.layer()))),
+  );
+
+  it.effect("stops after three rechecks when the provider stays unhealthy", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { provider, checkCalls } = yield* startupProvider([busySnapshot]);
+        yield* TestClock.adjust("10 minutes");
+        assert.strictEqual(yield* checkCalls, 4);
+        assert.deepStrictEqual(yield* provider.getSnapshot, busySnapshot);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(layerAlwaysRunTest, TestClock.layer()))),
+  );
+
+  it.effect("does not recheck a provider that is not installed or is disabled", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const missing = yield* startupProvider([{ ...busySnapshot, installed: false }]);
+        const disabled = yield* startupProvider([
+          { ...busySnapshot, enabled: false, status: "disabled" },
+        ]);
+        yield* TestClock.adjust("10 minutes");
+        assert.strictEqual(yield* missing.checkCalls, 1);
+        assert.strictEqual(yield* disabled.checkCalls, 1);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(layerAlwaysRunTest, TestClock.layer()))),
+  );
+
+  it.effect("skips the recheck once a manual refresh made the provider ready", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { provider, checkCalls } = yield* startupProvider([busySnapshot, refreshedSnapshot]);
+        yield* provider.refresh;
+        assert.strictEqual(yield* checkCalls, 2);
+        yield* TestClock.adjust("10 minutes");
+        assert.strictEqual(yield* checkCalls, 2);
+        assert.deepStrictEqual(yield* provider.getSnapshot, refreshedSnapshot);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(layerAlwaysRunTest, TestClock.layer()))),
   );
 });

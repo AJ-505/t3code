@@ -91,6 +91,12 @@ function parseCgroupCounter(text: string, key: string): number | undefined {
 // systemd's default 90 s stop timeout would outlast our leftover-agent wait.
 // Delegation lets rootless containers (Podman, kind) manage their own cgroups.
 const SCOPE_OPTIONS = ["--property=TimeoutStopSec=10s", "--property=Delegate=yes"];
+// systemd-oomd kills the cgroup with the worst memory pressure. An agent scope
+// is the largest cgroup in the user slice, so it is the default victim even
+// though losing it loses the work. "avoid" makes systemd-oomd pick a smaller
+// scope instead. The attribute is not inherited by child cgroups, so it has
+// to be set on the scope itself.
+const OOM_PREFERENCE_OPTION = "--property=ManagedOOMPreference=avoid";
 const STOPPING_POLL_INTERVAL = "100 millis";
 const STOPPING_POLL_ATTEMPTS = 20;
 const CLEAR_FAILED_INTERVAL = "1 second";
@@ -179,6 +185,7 @@ export const make = Effect.gen(function* () {
         yield* Effect.logInfo("Agent scopes are off: no systemd user manager");
         return undefined;
       }
+      const supportsOomPreference = yield* probe([...SCOPE_OPTIONS, OOM_PREFERENCE_OPTION]);
       const setProperties = Effect.fn("agentScope.setProperties")(function* (
         slice: string,
         properties: ReadonlyArray<string>,
@@ -205,12 +212,14 @@ export const make = Effect.gen(function* () {
         slice: AGENT_SLICE,
         ...limits,
         oomPolicy: supportsOomPolicy,
+        oomPreference: supportsOomPreference,
       });
       return {
         systemdRun,
         systemctl,
         runtimeDir,
         supportsOomPolicy,
+        supportsOomPreference,
       };
     }),
   );
@@ -415,6 +424,7 @@ export const make = Effect.gen(function* () {
           ...(scope.supportsOomPolicy
             ? [`--property=OOMPolicy=${continuing ? "continue" : "stop"}`]
             : []),
+          ...(scope.supportsOomPreference ? [OOM_PREFERENCE_OPTION] : []),
           ...(owned ? [] : ["--collect"]),
         ],
       };

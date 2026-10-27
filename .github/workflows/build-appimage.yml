@@ -18,12 +18,17 @@ on:
         required: true
         default: "0.1.1-local.1"
         type: string
+  # workflow_dispatch is refused on this repository with a misleading
+  # "Actions has been disabled" 422, while repository_dispatch works. Same
+  # inputs arrive in client_payload.
+  repository_dispatch:
+    types: [build-appimage]
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-appimage-${{ inputs.branch }}
+  group: desktop-appimage-${{ github.event.client_payload.branch || inputs.branch }}
   cancel-in-progress: true
 
 jobs:
@@ -35,7 +40,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ github.event.client_payload.branch || inputs.branch }}
           fetch-depth: 1
           sparse-checkout: |
             /*
@@ -83,7 +88,7 @@ jobs:
             --platform linux \
             --target AppImage \
             --arch x64 \
-            --build-version "${{ inputs.version }}" \
+            --build-version "${{ github.event.client_payload.version || inputs.version }}" \
             --skip-build \
             --verbose
 

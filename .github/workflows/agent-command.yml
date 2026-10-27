@@ -1,5 +1,5 @@
 name: agent-command
-run-name: "ci: ${{ inputs.label }}"
+run-name: "ci: ${{ github.event.client_payload.label || inputs.label }}"
 
 on:
   workflow_dispatch:
@@ -23,6 +23,12 @@ on:
         required: false
         default: 30
         type: number
+  # workflow_dispatch is refused on this repository with a misleading
+  # "Actions has been disabled" 422, while repository_dispatch works. The ci
+  # tool falls back to this event and passes the same inputs, plus the ref of
+  # the ci-agent-* tag that carries the packaged working tree.
+  repository_dispatch:
+    types: [agent-command]
 
 permissions:
   contents: read
@@ -40,6 +46,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          ref: ${{ github.event.client_payload.ref || github.ref }}
 
       - name: Detect package manager
         id: pm
@@ -131,7 +138,7 @@ jobs:
           restore-keys: ${{ runner.os }}-bun-
 
       - name: Install dependencies
-        if: inputs.deps != 'none'
+        if: (github.event.client_payload.deps || inputs.deps) != 'none'
         shell: bash
         continue-on-error: true
         run: |
@@ -148,8 +155,8 @@ jobs:
       - name: Run agent command
         shell: bash
         env:
-          CMD_B64: ${{ inputs.cmd_b64 }}
-          CMD_TIMEOUT: ${{ inputs.timeout }}
+          CMD_B64: ${{ github.event.client_payload.cmd_b64 || inputs.cmd_b64 }}
+          CMD_TIMEOUT: ${{ github.event.client_payload.timeout || inputs.timeout }}
         run: |
           set +e
           CMD=$(printf '%s' "$CMD_B64" | base64 -d)

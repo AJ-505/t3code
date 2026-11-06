@@ -48,6 +48,11 @@ jobs:
           fetch-depth: 1
           ref: ${{ github.event.client_payload.ref || github.ref }}
 
+      - name: Setup Vite+
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install: "false"
+
       - name: Detect package manager
         id: pm
         shell: bash

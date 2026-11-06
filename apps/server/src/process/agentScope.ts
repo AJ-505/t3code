@@ -88,14 +88,7 @@ function parseCgroupCounter(text: string, key: string): number | undefined {
   return match === null ? undefined : Number(match[1]);
 }
 
-// systemd's default 90 s stop timeout would outlast our leftover-agent wait.
-// Delegation lets rootless containers (Podman, kind) manage their own cgroups.
 const SCOPE_OPTIONS = ["--property=TimeoutStopSec=10s", "--property=Delegate=yes"];
-// systemd-oomd kills the cgroup with the worst memory pressure. An agent scope
-// is the largest cgroup in the user slice, so it is the default victim even
-// though losing it loses the work. "avoid" makes systemd-oomd pick a smaller
-// scope instead. The attribute is not inherited by child cgroups, so it has
-// to be set on the scope itself.
 const OOM_PREFERENCE_OPTION = "--property=ManagedOOMPreference=avoid";
 const STOPPING_POLL_INTERVAL = "100 millis";
 const STOPPING_POLL_ATTEMPTS = 20;

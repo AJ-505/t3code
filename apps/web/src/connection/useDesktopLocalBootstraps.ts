@@ -6,13 +6,6 @@ import { readDesktopSecondaryBootstraps } from "./desktopLocal";
 
 const DESKTOP_LOCAL_BOOTSTRAP_POLL_MS = 10_000;
 
-/**
- * The bridge exposes no change event, so this re-reads on an interval while
- * anything reads it and the window is visible; failed reads retain the latest
- * successful snapshot, while a successful empty read clears it. The reader
- * returns the same array while nothing changed, so an unchanged poll notifies
- * no one.
- */
 const desktopLocalBootstrapsAtom = Atom.make((get) => {
   let interval: ReturnType<typeof setInterval> | undefined;
   const read = () => get.setSelf(readDesktopSecondaryBootstraps());
